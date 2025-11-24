@@ -1,136 +1,133 @@
-#!/usr/bin/env bash
-set -euo pipefail
+#!/bin/bash
+set -e
 
-# ================== 默认参数 ==================
-UUID="${UUID:-$(cat /proc/sys/kernel/random/uuid)}"
-XRAY_PORT="${XRAY_PORT:-10080}"
-WS_PATH="${WS_PATH:-/vmess}"
-ARGO_TOKEN="${ARGO_TOKEN:-}"   # 留空则使用 Quick Tunnel
+WORK_DIR="/etc/xray"
+CONFIG_FILE="$WORK_DIR/config.json"
+UUID=${UUID:-$(cat /proc/sys/kernel/random/uuid)}
+XRAY_PORT=${XRAY_PORT:-10080}
+WS_PATH=${WS_PATH:-/vmess}
 
-# ================== 安装依赖 ==================
-install_xray() {
-  if command -v xray >/dev/null 2>&1; then
-    echo "[+] Xray 已存在"
-    return
+# 安装依赖
+install_deps() {
+  if ! command -v curl >/dev/null; then
+    apt update -y && apt install -y curl unzip || yum install -y curl unzip
   fi
-  echo "[+] 安装 Xray..."
-  tmpdir="$(mktemp -d)"
-  cd "$tmpdir"
-  arch="$(uname -m)"
-  case "$arch" in
-    x86_64|amd64) dl_arch="64" ;;
-    aarch64|arm64) dl_arch="arm64-v8a" ;;
-    armv7l) dl_arch="arm32-v7a" ;;
-    *) dl_arch="64" ;;
-  esac
-  url="https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-$dl_arch.zip"
-  curl -fsSL "$url" -o xray.zip
-  unzip -q xray.zip
-  install -m 755 xray /usr/local/bin/xray
-  echo "[+] Xray 安装完成"
 }
 
+# 安装 Xray
+install_xray() {
+  arch=$(uname -m)
+  case "$arch" in
+    x86_64) dl_arch="64" ;;
+    aarch64) dl_arch="arm64-v8a" ;;
+    *) dl_arch="64" ;;
+  esac
+  mkdir -p $WORK_DIR
+  curl -fsSL "https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-$dl_arch.zip" -o xray.zip
+  unzip -q xray.zip -d $WORK_DIR && rm xray.zip
+  install -m 755 $WORK_DIR/xray /usr/local/bin/xray
+}
+
+# 安装 cloudflared
 install_cloudflared() {
-  if command -v cloudflared >/dev/null 2>&1; then
-    echo "[+] cloudflared 已存在"
-    return
-  fi
-  echo "[+] 安装 cloudflared..."
-  arch="$(uname -m)"
+  arch=$(uname -m)
   url="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64"
   [ "$arch" = "aarch64" ] && url="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-arm64"
   curl -fsSL "$url" -o /usr/local/bin/cloudflared
   chmod +x /usr/local/bin/cloudflared
-  echo "[+] cloudflared 安装完成"
 }
 
-# ================== 写配置 ==================
-write_xray_config() {
-  mkdir -p /etc/xray
-  cat > /etc/xray/config.json <<EOF
+# 写配置文件
+write_config() {
+  cat > $CONFIG_FILE <<EOF
 {
-  "log": { "loglevel": "warning" },
-  "inbounds": [
-    {
-      "port": $XRAY_PORT,
-      "protocol": "vmess",
-      "settings": {
-        "clients": [{ "id": "$UUID", "alterId": 0 }]
-      },
-      "streamSettings": {
-        "network": "ws",
-        "wsSettings": { "path": "$WS_PATH" }
-      }
+  "inbounds": [{
+    "port": $XRAY_PORT,
+    "protocol": "vmess",
+    "settings": { "clients": [{ "id": "$UUID" }] },
+    "streamSettings": {
+      "network": "ws",
+      "wsSettings": { "path": "$WS_PATH" }
     }
-  ],
-  "outbounds": [{ "protocol": "freedom", "settings": {} }]
+  }],
+  "outbounds": [{ "protocol": "freedom" }]
 }
 EOF
-  echo "[+] Xray 配置写入 /etc/xray/config.json"
 }
 
-# ================== 启动服务 ==================
-start_xray() {
-  echo "[+] 启动 Xray..."
-  nohup xray -c /etc/xray/config.json >/dev/null 2>&1 &
-  XRAY_PID=$!
-  echo "[+] Xray PID: $XRAY_PID"
-}
+# 启动服务
+start_services() {
+  nohup xray -c $CONFIG_FILE >/dev/null 2>&1 &
+  echo -e "\n请选择隧道模式："
+  echo "1. 临时隧道 (Quick Tunnel) —— 简单快速，但域名随机、不稳定"
+  echo "2. 自建隧道 (需要 Cloudflare 账号和 token) —— 域名固定，稳定性高"
+  read -p "请输入选择 (1/2): " choice
 
-start_argo() {
-  echo "[+] 启动 Cloudflare Argo..."
-  if [ -n "$ARGO_TOKEN" ]; then
-    nohup cloudflared tunnel run --token "$ARGO_TOKEN" >/tmp/cloudflared.log 2>&1 &
+  if [ "$choice" = "2" ]; then
+    read -p "请输入你的 Argo 隧道 token: " ARGO_TOKEN
+    nohup cloudflared tunnel run --token "$ARGO_TOKEN" >/tmp/argo.log 2>&1 &
   else
-    nohup cloudflared tunnel --url "http://localhost:$XRAY_PORT" --no-autoupdate >/tmp/cloudflared.log 2>&1 &
+    nohup cloudflared tunnel --url "http://localhost:$XRAY_PORT" --no-autoupdate >/tmp/argo.log 2>&1 &
   fi
   sleep 5
-  ARGO_HOST=$(grep -Eo 'https://[a-z0-9-]+\.trycloudflare\.com' /tmp/cloudflared.log | tail -n1 || true)
-  if [ -z "$ARGO_HOST" ]; then
-    ARGO_HOST="https://未获取域名"
-  fi
 }
 
-# ================== 输出客户端链接 ==================
-print_client_link() {
-  local domain="${ARGO_HOST#https://}"
-  local ps="vmess-argo"
-  client_json=$(cat <<JSON
+# 输出链接
+print_link() {
+  domain=$(grep -Eo 'https://[a-z0-9-]+\.trycloudflare\.com' /tmp/argo.log | tail -n1)
+  [ -z "$domain" ] && domain="https://请检查 Argo 隧道是否成功启动"
+  clean_domain="${domain#https://}"
+  json=$(cat <<JSON
 {
   "v": "2",
-  "ps": "$ps",
-  "add": "$domain",
+  "ps": "vmess-argo",
+  "add": "$clean_domain",
   "port": "443",
   "id": "$UUID",
   "aid": "0",
   "net": "ws",
   "type": "none",
-  "host": "$domain",
+  "host": "$clean_domain",
   "path": "$WS_PATH",
   "tls": "tls"
 }
 JSON
 )
-  b64=$(echo -n "$client_json" | base64 -w 0)
-  echo "====================================================="
-  echo "[+] 部署完成"
-  echo "[+] UUID: $UUID"
-  echo "[+] XRAY_PORT: $XRAY_PORT"
-  echo "[+] WS_PATH: $WS_PATH"
-  echo "[+] ARGO 域名: $ARGO_HOST"
-  echo "[+] 客户端导入链接："
-  echo "vmess://$b64"
-  echo "====================================================="
+  link="vmess://$(echo -n "$json" | base64 -w0)"
+  echo "====================================="
+  echo "UUID: $UUID"
+  echo "WS_PATH: $WS_PATH"
+  echo "Argo 域名: $domain"
+  echo "客户端导入链接:"
+  echo "$link"
+  echo "====================================="
 }
 
-# ================== 主流程 ==================
-main() {
-  install_xray
-  install_cloudflared
-  write_xray_config
-  start_xray
-  start_argo
-  print_client_link
+# 卸载
+uninstall_all() {
+  echo "正在卸载 Xray + Argo..."
+  pkill -f xray || true
+  pkill -f cloudflared || true
+  rm -rf $WORK_DIR
+  rm -f /usr/local/bin/xray
+  rm -f /usr/local/bin/cloudflared
+  rm -f /tmp/argo.log
+  echo "卸载完成！"
 }
 
-main "$@"
+# 菜单
+menu() {
+  echo "===== Xray + Argo 管理 ====="
+  echo "1. 安装并启动 (生成一键链接)"
+  echo "2. 卸载"
+  echo "0. 退出"
+  read -p "请选择操作: " choice
+  case "$choice" in
+    1) install_deps; install_xray; install_cloudflared; write_config; start_services; print_link ;;
+    2) uninstall_all ;;
+    0) exit 0 ;;
+    *) echo "无效选择" ;;
+  esac
+}
+
+menu
