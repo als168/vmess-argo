@@ -136,11 +136,11 @@ diagnose() {
     error "Xray 入站无法访问，请检查是否启动或端口是否开放"
   fi
 
-  echo "2. 检查 Argo 隧道..."
-  if curl -vk https://$ARGO_DOMAIN >/dev/null 2>&1; then
-    info "Argo 隧道握手成功"
+  echo "2. 检查 Argo 隧道 (完整路径)..."
+  if curl -vk https://$ARGO_DOMAIN$WS_PATH >/dev/null 2>&1; then
+    info "Argo 隧道转发正常"
   else
-    error "Argo 隧道无法握手，请检查 cloudflared 是否运行"
+    error "Argo 隧道无法转发，请检查 cloudflared 是否运行或配置是否匹配"
   fi
 
   echo "3. 客户端配置提示："
