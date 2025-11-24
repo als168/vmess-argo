@@ -4,7 +4,7 @@ set -e
 WORK_DIR="/etc/xray"
 CONFIG_FILE="$WORK_DIR/config.json"
 UUID=${UUID:-$(cat /proc/sys/kernel/random/uuid)}
-XRAY_PORT=10080
+XRAY_PORT=8001
 WS_PATH="/vmess"
 ARGO_DOMAIN=""
 
