@@ -32,7 +32,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/als168/vmess-argo/main/vmess
 2. 安装并启动 (自建隧道)
 3. 卸载
 0. 退出
-
+---
 选 1 → 临时隧道，自动生成 trycloudflare.com 域名
 
 选 2 → 自建隧道，需要输入：
