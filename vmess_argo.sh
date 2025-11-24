@@ -6,6 +6,7 @@ CONFIG_FILE="$WORK_DIR/config.json"
 UUID=${UUID:-$(cat /proc/sys/kernel/random/uuid)}
 XRAY_PORT=${XRAY_PORT:-10080}
 WS_PATH=${WS_PATH:-/vmess}
+ARGO_DOMAIN=""
 
 # 安装依赖
 install_deps() {
@@ -37,7 +38,7 @@ install_cloudflared() {
   chmod +x /usr/local/bin/cloudflared
 }
 
-# 写配置文件
+# 写配置文件（包含 TLS 和 Argo 域名）
 write_config() {
   cat > $CONFIG_FILE <<EOF
 {
@@ -47,7 +48,11 @@ write_config() {
     "settings": { "clients": [{ "id": "$UUID" }] },
     "streamSettings": {
       "network": "ws",
-      "wsSettings": { "path": "$WS_PATH" }
+      "security": "tls",
+      "tlsSettings": {
+        "serverName": "$ARGO_DOMAIN"
+      },
+      "wsSettings": { "path": "$WS_PATH", "headers": { "Host": "$ARGO_DOMAIN" } }
     }
   }],
   "outbounds": [{ "protocol": "freedom" }]
@@ -55,12 +60,12 @@ write_config() {
 EOF
 }
 
-# 启动服务
+# 启动服务并获取域名
 start_services() {
   nohup xray -c $CONFIG_FILE >/dev/null 2>&1 &
   echo -e "\n请选择隧道模式："
-  echo "1. 临时隧道 (Quick Tunnel) —— 简单快速，但域名随机、不稳定"
-  echo "2. 自建隧道 (需要 Cloudflare 账号和 token) —— 域名固定，稳定性高"
+  echo "1. 临时隧道 (Quick Tunnel)"
+  echo "2. 自建隧道 (需要 Cloudflare token)"
   read -p "请输入选择 (1/2): " choice
 
   if [ "$choice" = "2" ]; then
@@ -69,25 +74,41 @@ start_services() {
   else
     nohup cloudflared tunnel --url "http://localhost:$XRAY_PORT" --no-autoupdate >/tmp/argo.log 2>&1 &
   fi
-  sleep 5
+
+  # 等待域名生成
+  for i in {1..10}; do
+    sleep 2
+    domain=$(grep -Eo 'https://[a-z0-9-]+\.trycloudflare\.com' /tmp/argo.log | tail -n1)
+    if [ -n "$domain" ]; then
+      ARGO_DOMAIN="${domain#https://}"
+      break
+    fi
+  done
+
+  if [ -z "$ARGO_DOMAIN" ]; then
+    echo "❌ 未能获取 Argo 域名，请检查 cloudflared 是否成功启动"
+    exit 1
+  fi
+
+  # 更新配置文件，写入域名
+  write_config
+  pkill -f xray || true
+  nohup xray -c $CONFIG_FILE >/dev/null 2>&1 &
 }
 
 # 输出链接
 print_link() {
-  domain=$(grep -Eo 'https://[a-z0-9-]+\.trycloudflare\.com' /tmp/argo.log | tail -n1)
-  [ -z "$domain" ] && domain="https://请检查 Argo 隧道是否成功启动"
-  clean_domain="${domain#https://}"
   json=$(cat <<JSON
 {
   "v": "2",
   "ps": "vmess-argo",
-  "add": "$clean_domain",
+  "add": "$ARGO_DOMAIN",
   "port": "443",
   "id": "$UUID",
   "aid": "0",
   "net": "ws",
   "type": "none",
-  "host": "$clean_domain",
+  "host": "$ARGO_DOMAIN",
   "path": "$WS_PATH",
   "tls": "tls"
 }
@@ -97,7 +118,7 @@ JSON
   echo "====================================="
   echo "UUID: $UUID"
   echo "WS_PATH: $WS_PATH"
-  echo "Argo 域名: $domain"
+  echo "Argo 域名: https://$ARGO_DOMAIN"
   echo "客户端导入链接:"
   echo "$link"
   echo "====================================="
@@ -123,7 +144,7 @@ menu() {
   echo "0. 退出"
   read -p "请选择操作: " choice
   case "$choice" in
-    1) install_deps; install_xray; install_cloudflared; write_config; start_services; print_link ;;
+    1) install_deps; install_xray; install_cloudflared; start_services; print_link ;;
     2) uninstall_all ;;
     0) exit 0 ;;
     *) echo "无效选择" ;;
