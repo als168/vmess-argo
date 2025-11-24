@@ -6,6 +6,7 @@ CONFIG_FILE="$WORK_DIR/config.json"
 UUID=${UUID:-$(cat /proc/sys/kernel/random/uuid)}
 XRAY_PORT=8001
 WS_PATH="/vmess"
+ARGO_DOMAIN=""
 
 install_xray() {
   mkdir -p $WORK_DIR
@@ -47,17 +48,17 @@ EOF
 
 write_cloudflared_config() {
   read -p "请输入你的隧道ID: " TUNNEL_ID
-  read -p "请输入你在 Cloudflare 控制台绑定的域名: " USER_DOMAIN
+  read -p "请输入你在 Cloudflare 控制台绑定的域名: " ARGO_DOMAIN
   mkdir -p /etc/cloudflared
   cat > /etc/cloudflared/config.yml <<EOF
 tunnel: $TUNNEL_ID
 credentials-file: /root/.cloudflared/$TUNNEL_ID.json
 
 ingress:
-  - hostname: $USER_DOMAIN
+  - hostname: $ARGO_DOMAIN
     service: http://localhost:$XRAY_PORT
     originRequest:
-      httpHostHeader: $USER_DOMAIN
+      httpHostHeader: $ARGO_DOMAIN
   - service: http_status:404
 EOF
 }
