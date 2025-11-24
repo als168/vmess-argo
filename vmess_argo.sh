@@ -73,7 +73,7 @@ start_services() {
     read -p "请输入你的 Argo 隧道 token: " ARGO_TOKEN
     nohup cloudflared tunnel run --token "$ARGO_TOKEN" >/tmp/argo.log 2>&1 &
   else
-    nohup cloudflared tunnel --url "http://localhost:$XRAY_PORT" --no-autoupdate >/tmp/argo.log 2>&1 &
+    nohup cloudflared tunnel --url "http://localhost:$XRAY_PORT" --protocol http2 --no-autoupdate >/tmp/argo.log 2>&1 &
   fi
 
   for i in {1..20}; do
@@ -92,6 +92,7 @@ start_services() {
 
   info "成功获取 Argo 域名: https://$ARGO_DOMAIN"
 
+  # 强制重写配置文件并重启 Xray
   write_config
   killall xray 2>/dev/null || true
   nohup xray -c $CONFIG_FILE >/dev/null 2>&1 &
@@ -173,7 +174,7 @@ watchdog() {
     fi
     if ! pgrep -x "cloudflared" >/dev/null; then
       warn "检测到 Cloudflared 已停止，正在重启..."
-      nohup cloudflared tunnel --url "http://localhost:$XRAY_PORT" --no-autoupdate >/tmp/argo.log 2>&1 &
+      nohup cloudflared tunnel --url "http://localhost:$XRAY_PORT" --protocol http2 --no-autoupdate >/tmp/argo.log 2>&1 &
     fi
 
     if [ $counter -ge 21600 ]; then
