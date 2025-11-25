@@ -20,8 +20,15 @@
 使用方法
 
 1. 下载并运行脚本
+ xray
+ ---
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/als168/vmess-argo/main/vmess_argo.sh)
+```
+sing-box
+---
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/als168/vmess-argo/main/sb_argo.sh)
 ```
 2. 选择模式
 ---
