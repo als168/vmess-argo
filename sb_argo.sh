@@ -19,9 +19,13 @@ GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
 PLAIN='\033[0m'
 
-# === 1. 环境准备 ===
+# === 1. 环境准备 (修复版) ===
 check_root() {
-    [ "$(id -u)" != "0" ] && echo -e "${RED}请使用 root 运行!${PLAIN}" && exit 1
+    # 使用 if 语句代替 && 简写，防止 set -e 误判退出
+    if [ "$(id -u)" != "0" ]; then
+        echo -e "${RED}请使用 root 运行!${PLAIN}"
+        exit 1
+    fi
 }
 
 detect_system() {
@@ -345,6 +349,5 @@ case "$choice" in
         ;;
     3) uninstall ;;
     0) exit 0 ;;
-    
     *) echo "无效";;
 esac
