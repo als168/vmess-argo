@@ -1,10 +1,8 @@
 #!/bin/bash
 # =========================================================
-# Sing-box + Argo 终极版 (V5.1 语法修复版)
-# 支持自定义选择 HTTP2 (TCP) 或 QUIC (UDP)
+# Sing-box + Argo 终极版 (V5.2 输入逻辑修复)
+# 修复: 在 curl 管道模式下无法正确读取用户选择的问题
 # =========================================================
-
-# set -e 
 
 # === 变量 ===
 PORT=8001
@@ -293,16 +291,18 @@ uninstall() {
     echo "卸载完成。"
 }
 
-# === 协议选择函数 ===
+# === 协议选择函数 (修复读取逻辑) ===
 select_protocol() {
     echo "------------------------------------------------"
     echo -e "${YELLOW}请选择 Cloudflare 隧道协议:${PLAIN}"
     echo "1. HTTP2 (TCP) - 兼容性好，稳，但容易被阻断"
     echo "2. QUIC  (UDP) - 速度快，穿透强，但部分地区封UDP"
     echo "------------------------------------------------"
-    read -p "请选择协议 [1-2] (默认2 QUIC): " proto_choice
+    # 关键修改： < /dev/tty 强制从终端读取用户输入，防止 curl 管道模式下跳过输入
+    read -p "请选择协议 [1-2] (默认2 QUIC): " proto_choice < /dev/tty
+    
     case "$proto_choice" in
-        1) PROTOCOL="http2" ;;
+        1*) PROTOCOL="http2" ;;
         *) PROTOCOL="quic" ;;
     esac
     echo -e "已选择协议: ${GREEN}$PROTOCOL${PLAIN}"
@@ -314,22 +314,23 @@ detect_system
 
 clear
 echo "------------------------------------------------"
-echo -e "${GREEN} Sing-box + Argo 终极版 (V5.1 多协议) ${PLAIN}"
+echo -e "${GREEN} Sing-box + Argo 终极版 (V5.2 修复版) ${PLAIN}"
 echo "------------------------------------------------"
 echo "1. 固定隧道 (Token模式)"
 echo "2. 临时隧道 (随机域名)"
 echo "3. 卸载"
 echo "0. 退出"
 echo "------------------------------------------------"
-read -p "选择: " choice
+# 关键修改： < /dev/tty
+read -p "选择: " choice < /dev/tty
 
 case "$choice" in
     1)
         select_protocol
         echo "请在 Cloudflare 后台将 Service 设置为: HTTP -> localhost:8001"
-        read -p "输入 Token: " TOKEN
+        read -p "输入 Token: " TOKEN < /dev/tty
         [ -z "$TOKEN" ] && exit 1
-        read -p "输入域名: " DOMAIN
+        read -p "输入域名: " DOMAIN < /dev/tty
         [ -z "$DOMAIN" ] && DOMAIN="fixed.com"
         MODE="fixed"
         optimize_env
