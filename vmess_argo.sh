@@ -1,10 +1,12 @@
 #!/bin/bash
 # =========================================================
-# Xray (VMess) + Argo 全能优化版 (128M 内存 / 256M 硬盘 专用)
-# 功能: 自动 Swap / GOGC 内存压制 / 硬盘瘦身 / 双模式选择
+# Xray (VMess) + Argo 终极修复版 (V6.0)
+# 1. 修复 Root 检测导致的闪退
+# 2. 修复 Alpine 获取域名失败的问题
+# 3. 优化 128M 内存占用
 # =========================================================
 
-set -e
+# set -e  <-- 也就是这一行导致了之前的闪退，我把它注释掉了
 
 # === 全局配置 ===
 PORT=8001
@@ -21,7 +23,11 @@ PLAIN='\033[0m'
 
 # === 1. 环境检查与准备 ===
 check_root() {
-    [ "$(id -u)" != "0" ] && echo -e "${RED}请使用 root 运行!${PLAIN}" && exit 1
+    # 修复逻辑：使用 if 判断，防止触发 set -e 退出
+    if [ "$(id -u)" != "0" ]; then
+        echo -e "${RED}请使用 root 运行!${PLAIN}"
+        exit 1
+    fi
 }
 
 detect_system() {
@@ -54,7 +60,6 @@ detect_arch() {
 
 # === 2. 极限环境优化 (核心) ===
 optimize_env() {
-    # 1. 自动 Swap (128M 机器必须有)
     MEM=$(free -m | awk '/Mem:/ { print $2 }')
     if [ "$MEM" -le 384 ]; then
         echo -e "${YELLOW}检测到小内存 ($MEM MB)，正在启用 Swap 防崩溃保护...${PLAIN}"
@@ -69,10 +74,9 @@ optimize_env() {
         fi
     fi
 
-    # 2. 安装基础依赖
     echo -e "${YELLOW}安装必要组件...${PLAIN}"
     $PKG_CMD curl wget unzip jq coreutils ca-certificates >/dev/null 2>&1
-    [ "$OS" == "alpine" ] && apk add --no-cache libgcc >/dev/null 2>&1
+    [ "$OS" == "alpine" ] && apk add --no-cache libgcc bash grep >/dev/null 2>&1
 }
 
 # === 3. 安装软件 (硬盘优化) ===
@@ -91,7 +95,6 @@ install_bins() {
         chmod +x $XRAY_BIN
         
         # [优化重点] 删除 Geo 文件和 Zip 包，节省 60MB+ 硬盘
-        echo -e "${YELLOW}执行硬盘瘦身...${PLAIN}"
         rm -f xray.zip $WORKDIR/geoip.dat $WORKDIR/geosite.dat $WORKDIR/*.md $WORKDIR/LICENSE
     fi
 
@@ -106,7 +109,6 @@ install_bins() {
 # === 4. 生成 Xray 配置 ===
 config_xray() {
     UUID=$(cat /proc/sys/kernel/random/uuid)
-    # 监听 127.0.0.1:8001，协议 WS (最省内存)
     cat > $CONFIG_FILE <<EOF
 {
   "log": { "loglevel": "error", "access": "none" },
@@ -127,7 +129,6 @@ setup_service() {
     MODE=$1
     TOKEN_OR_URL=$2
 
-    # 停止旧服务
     if [ "$INIT" == "systemd" ]; then
         systemctl stop xray_opt cloudflared_opt 2>/dev/null || true
     else
@@ -135,9 +136,8 @@ setup_service() {
         rc-service cloudflared_opt stop 2>/dev/null || true
     fi
 
-    # --- Systemd (Debian/Ubuntu/CentOS) ---
+    # --- Systemd ---
     if [ "$INIT" == "systemd" ]; then
-        # Xray Service (带 GOGC=20 优化)
         cat > /etc/systemd/system/xray_opt.service <<EOF
 [Unit]
 Description=Xray Optimized
@@ -151,7 +151,6 @@ LimitNOFILE=65535
 WantedBy=multi-user.target
 EOF
 
-        # Cloudflared Service (带 GOGC=20 优化)
         if [ "$MODE" == "fixed" ]; then
             CF_EXEC="$CF_BIN tunnel run --token $TOKEN_OR_URL"
         else
@@ -176,7 +175,6 @@ EOF
 
     # --- OpenRC (Alpine) ---
     elif [ "$INIT" == "openrc" ]; then
-        # Xray Service
         cat > /etc/init.d/xray_opt <<EOF
 #!/sbin/openrc-run
 description="Xray Optimized"
@@ -189,7 +187,6 @@ start_pre() { export GOGC=20; }
 EOF
         chmod +x /etc/init.d/xray_opt
 
-        # Cloudflared Service
         if [ "$MODE" == "fixed" ]; then
             CF_ARGS="tunnel run --token $TOKEN_OR_URL"
         else
@@ -208,7 +205,6 @@ error_log="/var/log/cloudflared.err"
 depend() { need net; after xray_opt; }
 start_pre() {
     export GOGC=20
-    # 启动前清空日志，防止硬盘爆满
     echo "" > /var/log/cloudflared.log
     echo "" > /var/log/cloudflared.err
 }
@@ -221,27 +217,31 @@ EOF
         rc-service cloudflared_opt restart
     fi
 
-    # [优化重点] 添加每日自动维护任务 (重启释放内存 + 清理日志)
-    # 每天凌晨 4 点执行
+    # 添加 Crontab
     if ! crontab -l 2>/dev/null | grep -q "cloudflared_opt"; then
-        CMD_RESTART="rc-service cloudflared_opt restart || systemctl restart cloudflared_opt"
-        (crontab -l 2>/dev/null; echo "0 4 * * * /bin/sh -c 'rm -f /var/log/cloudflared.*; $CMD_RESTART'") | crontab -
-        echo -e "${YELLOW}已添加每日凌晨4点自动维护任务${PLAIN}"
+        (crontab -l 2>/dev/null || true; echo "0 4 * * * /bin/sh -c 'rm -f /var/log/cloudflared.*; rc-service cloudflared_opt restart 2>/dev/null || systemctl restart cloudflared_opt 2>/dev/null'") | crontab - >/dev/null 2>&1 || true
     fi
 }
 
-# === 6. 获取临时域名 ===
+# === 6. 获取临时域名 (修复Alpine问题) ===
 get_temp_domain() {
     echo -e "${YELLOW}正在请求 Cloudflare 临时域名 (请等待 10 秒)...${PLAIN}"
     sleep 8
-    if [ "$INIT" == "systemd" ]; then
-        LOG_CMD="journalctl -u cloudflared_opt --no-pager -n 50"
-    else
-        LOG_CMD="cat /var/log/cloudflared.err /var/log/cloudflared.log 2>/dev/null"
-    fi
     
+    DOMAIN=""
     for i in {1..10}; do
-        DOMAIN=$($LOG_CMD | grep -oE "https://[a-zA-Z0-9-]+\.trycloudflare\.com" | head -n 1 | sed 's/https:\/\///')
+        if [ "$INIT" == "systemd" ]; then
+            DOMAIN=$(journalctl -u cloudflared_opt --no-pager -n 50 | grep -oE "https://[a-zA-Z0-9-]+\.trycloudflare\.com" | head -n 1 | sed 's/https:\/\///')
+        else
+            # 修复：直接读取文件，不使用变量传参
+            if [ -f "/var/log/cloudflared.err" ]; then
+                DOMAIN=$(grep -oE "https://[a-zA-Z0-9-]+\.trycloudflare\.com" /var/log/cloudflared.err | head -n 1 | sed 's/https:\/\///')
+            fi
+            if [ -z "$DOMAIN" ] && [ -f "/var/log/cloudflared.log" ]; then
+                DOMAIN=$(grep -oE "https://[a-zA-Z0-9-]+\.trycloudflare\.com" /var/log/cloudflared.log | head -n 1 | sed 's/https:\/\///')
+            fi
+        fi
+
         if [ -n "$DOMAIN" ]; then
             break
         fi
@@ -249,7 +249,7 @@ get_temp_domain() {
     done
     
     if [ -z "$DOMAIN" ]; then
-        echo -e "${RED}获取失败，请检查网络或稍后重试。${PLAIN}"
+        echo -e "${RED}获取失败，请检查日志 /var/log/cloudflared.err${PLAIN}"
         exit 1
     fi
 }
@@ -312,7 +312,8 @@ echo "2. 临时隧道 (无需 Token，随机域名，测试用)"
 echo "3. 卸载服务"
 echo "0. 退出"
 echo "------------------------------------------------"
-read -p "请选择 [0-3]: " choice
+# 修复：强制从 /dev/tty 读取，防止 curl 管道模式跳过
+read -p "请选择 [0-3]: " choice < /dev/tty
 
 case "$choice" in
     1)
@@ -321,9 +322,9 @@ case "$choice" in
         echo "请去 Cloudflare Zero Trust -> Access -> Tunnels"
         echo "设置 Public Hostname: Service -> HTTP -> localhost:8001"
         echo "------------------------------------------------"
-        read -p "请输入 Cloudflare Tunnel Token: " TOKEN
+        read -p "请输入 Cloudflare Tunnel Token: " TOKEN < /dev/tty
         [ -z "$TOKEN" ] && echo "Token 不能为空" && exit 1
-        read -p "请输入绑定的域名 (仅用于显示): " DOMAIN
+        read -p "请输入绑定的域名 (仅用于显示): " DOMAIN < /dev/tty
         [ -z "$DOMAIN" ] && DOMAIN="fixed-domain.com"
         
         MODE="fixed"
