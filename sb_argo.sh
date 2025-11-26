@@ -1,12 +1,11 @@
 #!/bin/bash
 # =========================================================
-# Sing-box + Argo 最终魔改版 (V4.0 QUIC专用)
-# 1. 强制使用 QUIC 协议 (解决临时隧道断连)
-# 2. 移除 set -e (防止脚本闪退)
-# 3. 修复 Alpine 日志读取问题
+# Sing-box + Argo 终极版 (V5.0 多协议选择)
+# 支持自定义选择 HTTP2 (TCP) 或 QUIC (UDP)
+# 专为 128MB Alpine 优化
 # =========================================================
 
-# set -e  <-- 已注释，防止脚本闪退
+# set -e 
 
 # === 变量 ===
 PORT=8001
@@ -122,10 +121,11 @@ config_singbox() {
 EOF
 }
 
-# === 5. 设置服务 (强制开启 QUIC) ===
+# === 5. 设置服务 (动态协议) ===
 setup_service() {
     MODE=$1
     TOKEN_OR_URL=$2
+    PROTOCOL=$3  # 接收协议参数 (http2 或 quic)
 
     if [ "$INIT" == "systemd" ]; then
         systemctl stop singbox_lite cloudflared_lite 2>/dev/null || true
@@ -150,10 +150,9 @@ WantedBy=multi-user.target
 EOF
 
         if [ "$MODE" == "fixed" ]; then
-            CF_EXEC="$CF_BIN tunnel run --token $TOKEN_OR_URL"
+            CF_EXEC="$CF_BIN tunnel run --protocol $PROTOCOL --token $TOKEN_OR_URL"
         else
-            # 这里的 protocol 已经强制改为了 quic
-            CF_EXEC="$CF_BIN tunnel --url http://localhost:$PORT --no-autoupdate --protocol quic"
+            CF_EXEC="$CF_BIN tunnel --url http://localhost:$PORT --no-autoupdate --protocol $PROTOCOL"
         fi
 
         cat > /etc/systemd/system/cloudflared_lite.service <<EOF
@@ -187,10 +186,9 @@ EOF
         chmod +x /etc/init.d/singbox_lite
 
         if [ "$MODE" == "fixed" ]; then
-            CF_ARGS="tunnel run --token $TOKEN_OR_URL"
+            CF_ARGS="tunnel run --protocol $PROTOCOL --token $TOKEN_OR_URL"
         else
-            # 这里的 protocol 已经强制改为了 quic
-            CF_ARGS="tunnel --url http://localhost:$PORT --no-autoupdate --protocol quic"
+            CF_ARGS="tunnel --url http://localhost:$PORT --no-autoupdate --protocol $PROTOCOL"
         fi
 
         cat > /etc/init.d/cloudflared_lite <<EOF
@@ -223,9 +221,9 @@ EOF
     fi
 }
 
-# === 6. 获取临时域名 (V4修复版) ===
+# === 6. 获取临时域名 ===
 get_temp_domain() {
-    echo -e "${YELLOW}正在获取临时域名 (QUIC模式, 等待5秒)...${PLAIN}"
+    echo -e "${YELLOW}正在获取临时域名 (协议: $PROTOCOL, 等待5秒)...${PLAIN}"
     sleep 5
     
     DOMAIN=""
@@ -233,7 +231,6 @@ get_temp_domain() {
         if [ "$INIT" == "systemd" ]; then
             DOMAIN=$(journalctl -u cloudflared_lite --no-pager -n 50 | grep -oE "https://[a-zA-Z0-9-]+\.trycloudflare\.com" | head -n 1 | sed 's/https:\/\///')
         else
-            # Alpine 日志读取修复
             if [ -f "/var/log/cloudflared.err" ]; then
                 DOMAIN=$(grep -oE "https://[a-zA-Z0-9-]+\.trycloudflare\.com" /var/log/cloudflared.err | head -n 1 | sed 's/https:\/\///')
             fi
@@ -257,7 +254,7 @@ get_temp_domain() {
 show_result() {
     echo ""
     echo "=================================================="
-    echo -e "       ${GREEN}Sing-box + Argo (QUIC) 安装成功!${PLAIN}"
+    echo -e "       ${GREEN}Sing-box + Argo ($PROTOCOL) 安装成功!${PLAIN}"
     echo "=================================================="
     echo -e "域名 (Address) : ${YELLOW}$DOMAIN${PLAIN}"
     echo -e "端口 (Port)    : ${YELLOW}443${PLAIN}"
@@ -266,75 +263,13 @@ show_result() {
     echo -e "路径 (Path)    : ${YELLOW}/vmess${PLAIN}"
     echo "=================================================="
     
-    VMESS_JSON="{\"v\":\"2\",\"ps\":\"Argo-QUIC-${DOMAIN}\",\"add\":\"$DOMAIN\",\"port\":\"443\",\"id\":\"$UUID\",\"aid\":\"0\",\"scy\":\"auto\",\"net\":\"ws\",\"type\":\"none\",\"host\":\"$DOMAIN\",\"path\":\"/vmess\",\"tls\":\"tls\",\"sni\":\"$DOMAIN\"}"
+    VMESS_JSON="{\"v\":\"2\",\"ps\":\"Argo-${PROTOCOL}-${DOMAIN}\",\"add\":\"$DOMAIN\",\"port\":\"443\",\"id\":\"$UUID\",\"aid\":\"0\",\"scy\":\"auto\",\"net\":\"ws\",\"type\":\"none\",\"host\":\"$DOMAIN\",\"path\":\"/vmess\",\"tls\":\"tls\",\"sni\":\"$DOMAIN\"}"
     VMESS_LINK="vmess://$(echo -n "$VMESS_JSON" | base64 | tr -d '\n')"
     
-    echo -e "${GREEN}VMess 链接 (请复制):${PLAIN}"
+    echo -e "${GREEN}VMess 链接:${PLAIN}"
     echo "$VMESS_LINK"
     echo "=================================================="
     if [ "$MODE" == "temp" ]; then
-        echo -e "${YELLOW}提示: QUIC 模式穿透力更强，但域名仍是临时的。${PLAIN}"
-        echo -e "${YELLOW}如果连不上，请尝试在 v2rayN 把地址改为: www.visa.com.hk${PLAIN}"
-    fi
-}
-
-uninstall() {
-    echo "正在卸载..."
-    if [ "$INIT" == "systemd" ]; then
-        systemctl stop singbox_lite cloudflared_lite 2>/dev/null || true
-        systemctl disable singbox_lite cloudflared_lite 2>/dev/null || true
-        rm -f /etc/systemd/system/singbox_lite.service /etc/systemd/system/cloudflared_lite.service
-        systemctl daemon-reload
-    else
-        rc-service singbox_lite stop 2>/dev/null || true
-        rc-service cloudflared_lite stop 2>/dev/null || true
-        rc-update del singbox_lite default 2>/dev/null || true
-        rc-update del cloudflared_lite default 2>/dev/null || true
-        rm -f /etc/init.d/singbox_lite /etc/init.d/cloudflared_lite
-    fi
-    rm -rf $WORKDIR $SB_BIN $CF_BIN /var/log/cloudflared.*
-    echo "卸载完成。"
-}
-
-# === 菜单 ===
-check_root
-detect_system
-
-clear
-echo "------------------------------------------------"
-echo -e "${GREEN} Sing-box + Argo 魔改版 (V4.0 QUIC) ${PLAIN}"
-echo "------------------------------------------------"
-echo "1. 固定隧道 (Token模式)"
-echo "2. 临时隧道 (QUIC强力穿透模式)"
-echo "3. 卸载"
-echo "0. 退出"
-echo "------------------------------------------------"
-read -p "选择: " choice
-
-case "$choice" in
-    1)
-        echo "请在 Cloudflare 后台将 Service 设置为: HTTP -> localhost:8001"
-        read -p "输入 Token: " TOKEN
-        [ -z "$TOKEN" ] && exit 1
-        read -p "输入域名: " DOMAIN
-        [ -z "$DOMAIN" ] && DOMAIN="fixed.com"
-        MODE="fixed"
-        optimize_env
-        install_bins
-        config_singbox
-        setup_service "fixed" "$TOKEN"
-        show_result
-        ;;
-    2)
-        MODE="temp"
-        optimize_env
-        install_bins
-        config_singbox
-        setup_service "temp" ""
-        get_temp_domain
-        show_result
-        ;;
-    3) uninstall ;;
-    0) exit 0 ;;
-    *) echo "无效";;
-esac
+        echo -e "${YELLOW}提示: 临时域名重启会变。如果连不上，请在 v2rayN 尝试:${PLAIN}"
+        echo "1. 开启'跳过证书验证'"
+        echo "2.
