@@ -1,13 +1,11 @@
 #!/bin/bash
 # =========================================================
-# Xray (VMess) + Argo 终极修复版 (V6.1)
-# 1. 补全卸载功能
-# 2. 修复 Root 检测闪退
-# 3. 修复 Alpine 日志读取
-# 4. 完美适配 128M 小内存
+# Xray (VMess) + Argo 终极修复版 (V7.0)
+# 1. 自动识别 AMD64/ARM64 架构
+# 2. 增加下载文件校验，防止安装失败
+# 3. 修复 curl 管道模式下的输入问题
+# 4. 完美适配 128MB 小内存 (Swap + GOGC)
 # =========================================================
-
-# set -e 
 
 # === 变量 ===
 PORT=8001
@@ -22,7 +20,7 @@ GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
 PLAIN='\033[0m'
 
-# === 1. 环境检查与准备 ===
+# === 1. 环境检查 ===
 check_root() {
     if [ "$(id -u)" != "0" ]; then
         echo -e "${RED}请使用 root 运行!${PLAIN}"
@@ -49,20 +47,32 @@ detect_system() {
     fi
 }
 
+# 自动识别架构 (关键修复)
 detect_arch() {
     ARCH=$(uname -m)
     case "$ARCH" in
-        x86_64)  X_ARCH="64"; C_ARCH="amd64" ;;
-        aarch64) X_ARCH="arm64-v8a"; C_ARCH="arm64" ;;
-        *) echo -e "${RED}不支持的架构: $ARCH${PLAIN}"; exit 1 ;;
+        x86_64)  
+            X_ARCH="64"
+            C_ARCH="amd64"
+            ;;
+        aarch64) 
+            X_ARCH="arm64-v8a"
+            C_ARCH="arm64"
+            ;;
+        *) 
+            echo -e "${RED}不支持的架构: $ARCH${PLAIN}"
+            exit 1 
+            ;;
     esac
+    echo -e "${GREEN}检测到架构: $ARCH${PLAIN}"
 }
 
-# === 2. 极限环境优化 ===
+# === 2. 优化与依赖 ===
 optimize_env() {
+    # 自动 Swap
     MEM=$(free -m | awk '/Mem:/ { print $2 }')
     if [ "$MEM" -le 384 ]; then
-        echo -e "${YELLOW}检测到小内存 ($MEM MB)，正在启用 Swap 防崩溃保护...${PLAIN}"
+        echo -e "${YELLOW}检测到小内存 ($MEM MB)，启用 Swap...${PLAIN}"
         if [ ! -f /swapfile ]; then
             dd if=/dev/zero of=/swapfile bs=1M count=512 status=none || true
             chmod 600 /swapfile
@@ -74,34 +84,56 @@ optimize_env() {
         fi
     fi
 
-    echo -e "${YELLOW}安装必要组件...${PLAIN}"
+    # 强制安装 unzip (修复解压失败)
+    echo -e "${YELLOW}安装依赖...${PLAIN}"
     $PKG_CMD curl wget unzip jq coreutils ca-certificates >/dev/null 2>&1
     [ "$OS" == "alpine" ] && apk add --no-cache libgcc bash grep >/dev/null 2>&1
 }
 
-# === 3. 安装软件 ===
+# === 3. 安装软件 (强力模式) ===
 install_bins() {
     mkdir -p $WORKDIR
     detect_arch
 
-    # 安装 Xray
+    # --- 安装 Xray ---
     if [ ! -f "$XRAY_BIN" ]; then
-        echo -e "${YELLOW}下载 Xray...${PLAIN}"
-        TAG=$(curl -s https://api.github.com/repos/XTLS/Xray-core/releases/latest | jq -r .tag_name)
-        [ -z "$TAG" ] || [ "$TAG" = "null" ] && TAG="v1.8.4"
-        curl -L -o xray.zip "https://github.com/XTLS/Xray-core/releases/download/$TAG/Xray-linux-$X_ARCH.zip"
-        unzip -qo xray.zip -d $WORKDIR
-        mv $WORKDIR/xray $XRAY_BIN
-        chmod +x $XRAY_BIN
-        # 删除 Geo 文件和 Zip 包，节省硬盘
+        echo -e "${YELLOW}正在下载 Xray (v1.8.4)...${PLAIN}"
+        # 强制使用 v1.8.4 稳定版，防止 API 获取失败
+        URL="https://github.com/XTLS/Xray-core/releases/download/v1.8.4/Xray-linux-$X_ARCH.zip"
+        
+        wget -O xray.zip "$URL"
+        
+        if [ ! -f "xray.zip" ]; then
+            echo -e "${RED}Xray 下载失败，请检查网络!${PLAIN}"
+            exit 1
+        fi
+
+        unzip -o xray.zip -d $WORKDIR
+        
+        # 移动并赋权
+        if [ -f "$WORKDIR/xray" ]; then
+            mv "$WORKDIR/xray" $XRAY_BIN
+            chmod +x $XRAY_BIN
+        else
+            echo -e "${RED}解压失败，未找到 binary 文件!${PLAIN}"
+            exit 1
+        fi
+        
+        # 瘦身
         rm -f xray.zip $WORKDIR/geoip.dat $WORKDIR/geosite.dat $WORKDIR/*.md $WORKDIR/LICENSE
+        echo -e "${GREEN}Xray 安装完成!${PLAIN}"
     fi
 
-    # 安装 Cloudflared
+    # --- 安装 Cloudflared ---
     if [ ! -f "$CF_BIN" ]; then
-        echo -e "${YELLOW}下载 Cloudflared...${PLAIN}"
+        echo -e "${YELLOW}正在下载 Cloudflared...${PLAIN}"
         curl -L -o $CF_BIN "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-$C_ARCH"
         chmod +x $CF_BIN
+        
+        if [ ! -f "$CF_BIN" ]; then
+            echo -e "${RED}Cloudflared 下载失败!${PLAIN}"
+            exit 1
+        fi
     fi
 }
 
@@ -123,11 +155,12 @@ config_xray() {
 EOF
 }
 
-# === 5. 设置服务 ===
+# === 5. 设置服务 (内存优化) ===
 setup_service() {
     MODE=$1
     TOKEN_OR_URL=$2
 
+    # 停止旧服务
     if [ "$INIT" == "systemd" ]; then
         systemctl stop xray_opt cloudflared_opt 2>/dev/null || true
     else
@@ -252,7 +285,7 @@ get_temp_domain() {
 show_result() {
     echo ""
     echo "=================================================="
-    echo -e "       ${GREEN}Xray + Argo 安装成功!${PLAIN}"
+    echo -e "       ${GREEN}Xray + Argo V7.0 安装成功!${PLAIN}"
     echo "=================================================="
     echo -e "地址 (Domain)  : ${YELLOW}$DOMAIN${PLAIN}"
     echo -e "端口 (Port)    : ${YELLOW}443${PLAIN}"
@@ -271,15 +304,14 @@ show_result() {
         echo -e "${RED}重要提示:${PLAIN} 请确保在 Cloudflare Tunnel 后台设置:"
         echo -e "Service: ${GREEN}HTTP${PLAIN}  ->  URL: ${GREEN}localhost:8001${PLAIN}"
     else
-        echo -e "${YELLOW}提示: 临时域名重启后会改变，请知悉。${PLAIN}"
+        echo -e "${YELLOW}提示: 临时域名重启后会改变，且容易被墙。${PLAIN}"
     fi
 }
 
-# === 8. 卸载功能 (已补全) ===
+# === 8. 卸载功能 ===
 uninstall() {
     echo -e "${YELLOW}正在卸载 Xray + Argo...${PLAIN}"
     
-    # 停止服务
     if [ "$INIT" == "systemd" ]; then
         systemctl stop xray_opt cloudflared_opt 2>/dev/null || true
         systemctl disable xray_opt cloudflared_opt 2>/dev/null || true
@@ -293,13 +325,9 @@ uninstall() {
         rm -f /etc/init.d/xray_opt /etc/init.d/cloudflared_opt
     fi
     
-    # 清理进程
     killall -9 xray cloudflared 2>/dev/null || true
-    
-    # 删除文件和目录
     rm -rf "$WORKDIR" "$XRAY_BIN" "$CF_BIN" /var/log/cloudflared.*
     
-    # 清理 Crontab
     crontab -l 2>/dev/null | grep -v "cloudflared_opt" | crontab -
     
     echo -e "${GREEN}卸载完成，系统已恢复纯净。${PLAIN}"
@@ -311,20 +339,22 @@ detect_system
 
 clear
 echo "------------------------------------------------"
-echo -e "${GREEN} Xray + Argo 极限优化脚本 (128MB内存专用) ${PLAIN}"
+echo -e "${GREEN} Xray + Argo 终极修复版 (V7.0) ${PLAIN}"
+echo -e "${YELLOW} 自动识别架构 | 强力安装模式 | 内存优化 ${PLAIN}"
 echo "------------------------------------------------"
 echo "1. 固定隧道 (Token模式, 长期推荐)"
 echo "2. 临时隧道 (随机域名, 临时测试)"
 echo "3. 卸载服务"
 echo "0. 退出"
 echo "------------------------------------------------"
+# 修复 curl 管道输入问题
 read -p "请选择 [0-3]: " choice < /dev/tty
 
 case "$choice" in
     1)
         read -p "请输入 Cloudflare Tunnel Token: " TOKEN < /dev/tty
         [ -z "$TOKEN" ] && echo "Token 不能为空" && exit 1
-        read -p "请输入绑定的域名 (仅用于显示): " DOMAIN < /dev/tty
+        read -p "请输入绑定的域名: " DOMAIN < /dev/tty
         [ -z "$DOMAIN" ] && DOMAIN="fixed-domain.com"
         
         MODE="fixed"
